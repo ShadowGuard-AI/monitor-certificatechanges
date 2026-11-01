@@ -32,7 +32,17 @@ def get_certificate_hashes(cert_dir, state_file=None):
                     with open(filepath, "rb") as f:
                         cert_data = f.read()
                         sha256_hash = hashlib.sha256(cert_data).hexdigest()
+                        # State is keyed by bare file name and the directory is read
+                        # one level deep, so this is a flat inventory. Certificates
+                        # in a subdirectory are outside it entirely, and a symlink is
+                        # hashed at its target's contents under the link's name.
                         certificate_hashes[filename] = sha256_hash
+                # A file I cannot read drops out of the current state without
+                # a marker. The comparison below then reports it as removed,
+                # and because the state is saved at the end of the run, it
+                # comes back as added on the first run that can read it
+                # again. Permission trouble therefore looks exactly like
+                # certificate churn in my output.
                 except OSError as e:
                     logging.error(f"Error reading certificate file {filename}: {e}")
     except OSError as e:
@@ -93,6 +103,11 @@ def main():
         except OSError as e:
             logging.error(f"Error creating directory for state file: {e}")
             sys.exit(1)
+    # The loaded state is trusted to be a mapping of names to
+    # hashes because a previous version of me wrote it that way.
+    # A state file holding valid JSON of another shape, a list,
+    # a bare string, reaches the comparison and fails there with
+    # an attribute error rather than being named as unusable.
     previous_state, is_baseline = load_previous_state(state_file)
     if previous_state is None:
         logging.error(f"State file {state_file} is corrupt or unreadable. Refusing to overwrite it.")
@@ -107,7 +122,17 @@ def main():
     if is_baseline:
         logging.info(f"Baseline captured: {len(current_state)} files hashed.")
     else:
+        # This is a one shot comparison, not a watcher. The state is
+        # overwritten at the end of every successful run, so each
+        # change is reported exactly once, by the first run after it
+        # happens, and a run whose log nobody read has still consumed
+        # the change.
         compare_certificate_states(previous_state, current_state)
+    # Detected changes never move the exit code: main falls off
+    # the end after this and exits 0 whether the comparison found
+    # an added trust anchor or nothing at all. Only failures to
+    # scan or to save produce a nonzero exit, so a caller has to
+    # read the log, not the code, to learn about changes.
     if not save_current_state(state_file, current_state):
         sys.exit(1)
 
